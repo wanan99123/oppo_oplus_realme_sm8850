@@ -96,7 +96,6 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
       ak3name: ${{ steps.create_zip.outputs.ak3name }}
-      bootname: ${{ steps.create_zip.outputs.bootname }}
     permissions:
       actions: write
       contents: read
@@ -486,8 +485,7 @@ jobs:
           echo "Rustc版本: $RUSTC_VERSION"
           echo "Bindgen版本: $BINDGEN_VERSION"
           
-          pahole_version=$(pahole --version 2>/dev/null || echo "未安装")
-          echo "pahole版本：$pahole_version"
+          pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole版本：未安装" || echo "pahole版本：$pahole_version"
           
           export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log"
           export CCACHE_COMPILERCHECK="none"
@@ -504,27 +502,35 @@ jobs:
           chmod 777 ./*.so
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
+          echo "FAKESTAT=$FAKESTAT" >> $GITHUB_ENV
+          echo "FAKETIME=$FAKETIME" >> $GITHUB_ENV
           SO_DIR=$(pwd)
           export PRELOAD_LIBS="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
           export REAL_CLANG_PATH="$WORKDIR/kernel_workspace/clang19/bin/clang"
           
-          cat > cc-wrapper << 'EOF'
-          #!/bin/bash
-          export LD_PRELOAD="$PRELOAD_LIBS"
-          export FAKESTAT="$FAKESTAT"
-          export FAKETIME="$FAKETIME"
-          ccache $REAL_CLANG_PATH "$@"
-          EOF
+          echo '#!/bin/bash' > cc-wrapper
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> cc-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> cc-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> cc-wrapper
+          echo 'ccache $REAL_CLANG_PATH "$@"' >> cc-wrapper
           
-          cat > ld-wrapper << 'EOF'
-          #!/bin/bash
-          export LD_PRELOAD="$PRELOAD_LIBS"
-          export FAKESTAT="$FAKESTAT"
-          export FAKETIME="$FAKETIME"
-          ld.lld "$@"
-          EOF
+          echo '#!/bin/bash' > ld-wrapper
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> ld-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> ld-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> ld-wrapper
+          echo 'ld.lld "$@"' >> ld-wrapper
           
+          echo '#!/bin/bash' > test-wrapper.sh
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> test-wrapper.sh
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> test-wrapper.sh
+          echo 'export FAKETIME="'$FAKETIME'"' >> test-wrapper.sh
+          echo 'exec "$@"' >> test-wrapper.sh
+          chmod +x test-wrapper.sh
+          ./test-wrapper.sh date
+          ./test-wrapper.sh stat ./Makefile
           chmod +x cc-wrapper ld-wrapper
+          echo "--- 编译前环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
+          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
           
           COMMON_REAL_PATH=$(pwd -P)
           ROOT_REAL_PATH=$(dirname "$COMMON_REAL_PATH")
@@ -535,7 +541,12 @@ jobs:
           export BINDGEN="bindgen"
           export CC="clang"
           export LIBCLANG_PATH="$WORKDIR/kernel_workspace/clang19/lib"
-          KCFLAGS+=" -no-canonical-prefixes -O2 -pipe -Wno-error -fno-stack-protector -D__ANDROID_COMMON_KERNEL__"
+          KCFLAGS+=" -no-canonical-prefixes"
+          KCFLAGS+=" -O2"
+          KCFLAGS+=" -pipe"
+          KCFLAGS+=" -Wno-error"
+          KCFLAGS+=" -fno-stack-protector"
+          KCFLAGS+=" -D__ANDROID_COMMON_KERNEL__"
           export KCFLAGS
           export HOSTCC=clang
           export LD="ld.lld"
@@ -543,19 +554,32 @@ jobs:
           export LLVM=1 LLVM_IAS=1
           export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export AR=llvm-ar NM=llvm-nm AS=clang READELF=llvm-readelf
+          export LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm AS=clang READELF=llvm-readelf
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump OBJSIZE=llvm-size STRIP=llvm-strip
           
           source "./_setup_env.sh" 2>/dev/null || true
           
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL &
-          make -j$(nproc) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" O=out gki_defconfig
-          export CC="$(pwd)/cc-wrapper"
-          export LD="$(pwd)/ld-wrapper"
-          make -j$(nproc) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out Image
+          sudo rm -rf /usr/share/dotnet &
+          sudo rm -rf /usr/local/lib/android &
+          sudo rm -rf /opt/ghc &
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig &&
+          export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper" &&
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
           
+          echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
+          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
           echo "内核编译完成！"
+          if [[ "${{ github.event.inputs.ccache_debug }}" == "true" ]]; then
+            echo "正在打包ccache日志及调试信息..."
+            cd ..
+            cp ./common/out/vmlinux.symvers ./vmlinux.symvers
+            cp ./common/out/.config ./config
+            zip -r9 debug.zip ccache.log config vmlinux.symvers
+          fi
+          echo "ccache状态："
           ccache -s
+          echo "编译后空间:"
           df -h
 
       - name: 保存新的 ccache 缓存
@@ -577,24 +601,19 @@ jobs:
             mv oImage Image
           fi
           
-      - name: 克隆 AnyKernel3 并打包 + 生成 boot.img
+      - name: 克隆 AnyKernel3 并打包
         id: create_zip
         run: |
           cd kernel_workspace
+          # 官方 AnyKernel3
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
           cd AnyKernel3
           cp ../common/out/arch/arm64/boot/Image ./Image
-          
           if [[ ! -f ./Image ]]; then
-            echo "未找到内核镜像文件，构建失败"
+            echo "未找到内核镜像文件，构建可能出错"
             exit 1
           fi
-          
-          # 复制一份纯内核镜像用于制作 boot
-          cp Image ../kernel
-          
-          # 打包 AK3
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
             KSU_TYPENAME="SukiSU"
           elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
@@ -606,59 +625,107 @@ jobs:
           else
             KSU_TYPENAME="none"
           fi
-          
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+            wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
+          fi
+          if [[ ${{ github.event.inputs.kpm_enable }} == 'kpn' ]]; then
+            wget https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
+          fi
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
             AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A16_${{ github.event.inputs.kernel_suffix }}.zip
-            BOOT_NAME=boot_${KSU_TYPENAME}_${{ env.KERNEL_VERSION }}_A16_${{ github.event.inputs.kernel_suffix }}.img
           else
             AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A16_${{ env.KERNEL_NAME }}.zip
-            BOOT_NAME=boot_${KSU_TYPENAME}_${{ env.KERNEL_VERSION }}_A16_${{ env.KERNEL_NAME }}.img
           fi
-          
-          zip -r9 ../$AK3_NAME ./*
-          cd ..
-          
-          # 下载 boot 工具并生成完整 boot.img
-          wget -O magiskboot https://raw.githubusercontent.com/topjohnwu/Magisk/master/tools/magiskboot
-          chmod +x magiskboot
-          wget -O stock_boot.img https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/boot/stock_boot_sm8850.img
-          ./magiskboot unpack stock_boot.img
-          cp kernel kernel
-          ./magiskboot repack stock_boot.img $BOOT_NAME
-          
+          zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
-          echo "bootname=$BOOT_NAME" >> $GITHUB_OUTPUT
 
-      - name: 上传 artifacts
+      - name: 上传 Ccache 调试日志
+        if: always() && inputs.ccache_debug
         uses: actions/upload-artifact@v7
         with:
-          name: kernel_output
-          path: |
-            kernel_workspace/*.zip
-            kernel_workspace/*.img
+          path: ${{ github.workspace }}/kernel_workspace/debug.zip
+          archive: false
+
+      - name: 上传 ZIP 工件
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ github.workspace }}/kernel_workspace/AnyKernel*.zip
+          archive: false
 
   release:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
+      actions: read
+      
     steps:
-      - name: 下载所有文件
+      - name: 下载 ZIP 工件
         uses: actions/download-artifact@v8
         with:
-          name: kernel_output
-          path: ./out
+          name: ${{ needs.build.outputs.ak3name }}
+          path: ./release_zips
+          skip-decompress: true
 
-      - name: 发布
-        uses: softprops/softprops/action-gh-release@v1
+      - name: 设置环境变量
+        run: |
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            FULL_VERSION=${{ format('{0}.23-{1}', env.KERNEL_VERSION, github.event.inputs.kernel_suffix) }}
+            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+            export FULL_VERSION=$FULL_VERSION
+          else
+            FULL_VERSION=${{ format('{0}.23-{1}', env.KERNEL_VERSION, env.KERNEL_NAME) }}
+            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+            export FULL_VERSION=$FULL_VERSION
+          fi
+          TIME="$(TZ='Asia/Shanghai' date +'%y%m%d%H%M%S')"
+          TIME_FORM="$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+          echo "TIME=$TIME" >> $GITHUB_ENV
+          echo "TIME_FORM=$TIME_FORM" >> $GITHUB_ENV
+          TAG_HEAD="OPPO+OPlus+Realme-A15-build"
+          echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
+          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+            KSU_TYPENAME="SukiSU Ultra"
+          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
+            KSU_TYPENAME="ReSukiSU"
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+            KSU_TYPENAME="KernelSU Next"
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
+            KSU_TYPENAME="KSU"
+          else
+            KSU_TYPENAME="无内置KSU"
+          fi
+          echo "KSU_TYPENAME=$KSU_TYPENAME" >> $GITHUB_ENV
+         
+      - name: 创建发布
+        id: create_release
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: "build-${{ github.run_id }}"
-          name: "内核 ${{ env.KERNEL_VERSION }} 完整包"
+          tag_name: "${{ env.TAG_HEAD }}-${{ env.TIME }}"
+          name: "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}"
           body: |
-            ✅ AnyKernel3.zip
-            ✅ boot.img
-            机型：一加/OPPO/Realme sm8850
+            ### 📱 欧加真 ${{ env.KSU_TYPENAME }} sm8850 通用内核 | 构建信息
+            - 内核版本号: ${{ env.FULL_VERSION }}
+            - 编译时间: ${{ env.TIME_FORM }}
+            - 机型：欧加真骁龙8E Gen5通用 6.12.23 内核
+            - KSU分支：${{ env.KSU_TYPENAME }}
+            - susfs支持：${{ github.event.inputs.susfs_enable }}
+            - KPM支持 ：${{ github.event.inputs.kpm_enable }}
+            - LZ4支持：${{ github.event.inputs.lz4_enable }}
+            - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
+            - 网络功能增强：${{ github.event.inputs.better_net }}
+            - BBR/Brutal 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
+            - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
+            - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
+            - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
+            ### ⏫️ 更新内容：
+            - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
+            ### 📋 安装方法
+            1. 进入Recovery刷入
+            2. 或内核工具直接刷入
+            #### ※ 刷写内核有风险，刷机前请备份boot分区 ※
           draft: false
+          prerelease: false
           files: |
-            out/*.zip
-            out/*.img
+            release_zips/AnyKernel3_*.zip
